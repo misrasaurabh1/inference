@@ -236,13 +236,11 @@ class WorkflowImageData:
         numpy_image: Optional[np.ndarray] = None,
         video_metadata: Optional[VideoMetadata] = None,
     ):
-        if not base64_image and numpy_image is None and not image_reference:
+        if not (base64_image or numpy_image is not None or image_reference):
             raise ValueError("Could not initialise empty `WorkflowImageData`.")
         self._parent_metadata = parent_metadata
         self._workflow_root_ancestor_metadata = (
-            workflow_root_ancestor_metadata
-            if workflow_root_ancestor_metadata
-            else self._parent_metadata
+            workflow_root_ancestor_metadata or parent_metadata
         )
         self._image_reference = image_reference
         self._base64_image = base64_image
@@ -415,13 +413,14 @@ class WorkflowImageData:
 
     def to_inference_format(self, numpy_preferred: bool = False) -> Dict[str, Any]:
         if numpy_preferred:
-            return {"type": "numpy_object", "value": self.numpy_image}
+            return {"type": "numpy_object", "value": self._numpy_image}
         if self._image_reference:
-            if self._image_reference.startswith(
-                "http://"
-            ) or self._image_reference.startswith("https://"):
-                return {"type": "url", "value": self._image_reference}
-            return {"type": "file", "value": self._image_reference}
+            ref_type = (
+                "url"
+                if self._image_reference.startswith(("http://", "https://"))
+                else "file"
+            )
+            return {"type": ref_type, "value": self._image_reference}
         if self._base64_image:
-            return {"type": "base64", "value": self.base64_image}
-        return {"type": "numpy_object", "value": self.numpy_image}
+            return {"type": "base64", "value": self._base64_image}
+        return {"type": "numpy_object", "value": self._numpy_image}
