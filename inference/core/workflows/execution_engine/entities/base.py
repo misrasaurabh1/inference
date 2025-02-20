@@ -129,14 +129,9 @@ class Batch(Generic[B]):
                 "Attempted to initialise Batch object providing batch indices of size differing "
                 "from size of the data."
             )
+        return cls(content, indices)
 
-        return cls(content=content, indices=indices)
-
-    def __init__(
-        self,
-        content: List[B],
-        indices: Optional[List[Tuple[int, ...]]],
-    ):
+    def __init__(self, content: List[B], indices: Optional[List[Tuple[int, ...]]]):
         self._content = content
         self._indices = indices
 
