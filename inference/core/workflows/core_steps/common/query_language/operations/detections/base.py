@@ -318,15 +318,13 @@ def _build_non_strict_class_to_id_mapping(
         class_name: class_id
         for class_name, class_id in zip(original_class_names, original_class_ids)
     }
-    new_target_classes = {
-        new_class_name
-        for new_class_name in class_map.values()
-        if new_class_name not in original_mapping
-    }
     new_class_id = new_classes_id_offset
-    for new_target_class in sorted(new_target_classes):
-        original_mapping[new_target_class] = new_class_id
-        new_class_id += 1
+
+    for new_class_name in sorted(class_map.values()):
+        if new_class_name not in original_mapping:
+            original_mapping[new_class_name] = new_class_id
+            new_class_id += 1
+
     return original_mapping
 
 
