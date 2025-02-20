@@ -32,6 +32,7 @@ from inference.enterprise.stream_management.manager.serialisation import (
     prepare_response,
 )
 from inference.enterprise.stream_management.manager.tcp_server import RoboflowTCPServer
+from queue import Empty
 
 PROCESSES_TABLE: Dict[str, Tuple[Process, Queue, Queue]] = {}
 HEADER_SIZE = 4
@@ -217,13 +218,20 @@ def handle_command(
 def get_response_ignoring_thrash(
     responses_queue: Queue, matching_request_id: str
 ) -> dict:
+    dropped_responses = []  # Collect responses for later logging
     while True:
-        response = responses_queue.get()
-        if response[0] == matching_request_id:
-            return response[1]
-        logger.warning(
-            f"Dropping response for request_id={response[0]} with payload={response[1]}"
-        )
+        try:
+            response = responses_queue.get_nowait()  # Use non-blocking call
+            if response[0] == matching_request_id:
+                if dropped_responses:
+                    logger.warning(
+                        f"Dropping responses for request_ids={[(resp[0], resp[1]) for resp in dropped_responses]}"
+                    )
+                return response[1]
+            else:
+                dropped_responses.append(response)
+        except Empty:
+            pass  # Allow the loop to continue if the queue is empty
 
 
 def execute_termination(
