@@ -236,13 +236,11 @@ class WorkflowImageData:
         numpy_image: Optional[np.ndarray] = None,
         video_metadata: Optional[VideoMetadata] = None,
     ):
-        if not base64_image and numpy_image is None and not image_reference:
+        if base64_image is None and numpy_image is None and image_reference is None:
             raise ValueError("Could not initialise empty `WorkflowImageData`.")
         self._parent_metadata = parent_metadata
         self._workflow_root_ancestor_metadata = (
-            workflow_root_ancestor_metadata
-            if workflow_root_ancestor_metadata
-            else self._parent_metadata
+            workflow_root_ancestor_metadata or self._parent_metadata
         )
         self._image_reference = image_reference
         self._base64_image = base64_image
@@ -312,32 +310,39 @@ class WorkflowImageData:
         Creates new instance of `WorkflowImageData` being a crop of original image,
         making adjustment to all metadata.
         """
+        origin_coords = origin_image_data.numpy_image.shape
+        root_ancestor_metadata = origin_image_data.workflow_root_ancestor_metadata
+        root_coords = root_ancestor_metadata.origin_coordinates
+
         parent_metadata = ImageParentMetadata(
             parent_id=crop_identifier,
             origin_coordinates=OriginCoordinatesSystem(
                 left_top_x=offset_x,
                 left_top_y=offset_y,
-                origin_width=origin_image_data.numpy_image.shape[1],
-                origin_height=origin_image_data.numpy_image.shape[0],
+                origin_width=origin_coords[1],
+                origin_height=origin_coords[0],
             ),
         )
-        workflow_root_ancestor_coordinates = replace(
-            origin_image_data.workflow_root_ancestor_metadata.origin_coordinates,
-            left_top_x=origin_image_data.workflow_root_ancestor_metadata.origin_coordinates.left_top_x
-            + offset_x,
-            left_top_y=origin_image_data.workflow_root_ancestor_metadata.origin_coordinates.left_top_y
-            + offset_y,
+
+        workflow_root_ancestor_coordinates = OriginCoordinatesSystem(
+            left_top_x=root_coords.left_top_x + offset_x,
+            left_top_y=root_coords.left_top_y + offset_y,
+            origin_width=root_coords.origin_width,
+            origin_height=root_coords.origin_height,
         )
+
         workflow_root_ancestor_metadata = ImageParentMetadata(
-            parent_id=origin_image_data.workflow_root_ancestor_metadata.parent_id,
+            parent_id=root_ancestor_metadata.parent_id,
             origin_coordinates=workflow_root_ancestor_coordinates,
         )
+
         video_metadata = None
         if preserve_video_metadata and origin_image_data._video_metadata is not None:
             video_metadata = copy(origin_image_data._video_metadata)
             video_metadata.video_identifier = (
                 f"{video_metadata.video_identifier} | crop: {crop_identifier}"
             )
+
         return WorkflowImageData(
             parent_metadata=parent_metadata,
             workflow_root_ancestor_metadata=workflow_root_ancestor_metadata,
