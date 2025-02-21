@@ -77,7 +77,7 @@ class Sam2Prompt(BaseModel):
     points: Optional[List[Point]] = Field(default=None)
 
     def num_points(self) -> int:
-        return len(self.points or [])
+        return len(self.points) if self.points else 0
 
 
 class Sam2PromptSet(BaseModel):
