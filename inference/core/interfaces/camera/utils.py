@@ -470,10 +470,11 @@ def resolve_limiter_strategy(
 ) -> FPSLimiterStrategy:
     if explicitly_defined_strategy is not None:
         return explicitly_defined_strategy
-    limiter_strategy = FPSLimiterStrategy.DROP
+
     if source_properties is not None and source_properties.is_file:
-        limiter_strategy = FPSLimiterStrategy.WAIT
-    return limiter_strategy
+        return FPSLimiterStrategy.WAIT
+
+    return FPSLimiterStrategy.DROP
 
 
 def limit_frame_rate(
