@@ -317,9 +317,11 @@ def run_gpt_4v_llm_prompting(
         raise ValueError(
             "Step that involves GPT-4V prompting requires OpenAI API key which was not provided."
         )
+
+    client = OpenAI(api_key=remote_api_key)  # Instantiate the client once
     return execute_gpt_4v_requests(
+        client=client,
         image=image,
-        remote_api_key=remote_api_key,
         prompt=prompt,
         lmm_config=lmm_config,
     )
@@ -331,7 +333,6 @@ def execute_gpt_4v_requests(
     prompt: str,
     lmm_config: LMMConfig,
 ) -> List[Dict[str, str]]:
-    client = OpenAI(api_key=remote_api_key)
     tasks = [
         partial(
             execute_gpt_4v_request,
@@ -342,6 +343,7 @@ def execute_gpt_4v_requests(
         )
         for single_image in image
     ]
+
     return run_in_parallel(
         tasks=tasks,
         max_workers=WORKFLOWS_REMOTE_EXECUTION_MAX_STEP_CONCURRENT_REQUESTS,
