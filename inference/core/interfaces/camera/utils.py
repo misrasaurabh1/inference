@@ -139,6 +139,7 @@ class VideoSourcesManager:
         self._ended_sources: Set[int] = set()
         self._threads_to_join: Set[int] = set()
         self._last_batch_yielded_time = datetime.now()
+        self._total_sources: int = len(self._video_sources.all_sources)
 
     def retrieve_frames_from_sources(
         self,
@@ -175,7 +176,7 @@ class VideoSourcesManager:
         return batch_frames
 
     def all_sources_ended(self) -> bool:
-        return len(self._ended_sources) >= len(self._video_sources.all_sources)
+        return len(self._ended_sources) >= self._total_sources
 
     def join_all_reconnection_threads(self, include_not_finished: bool = False) -> None:
         for source_ord in copy(self._threads_to_join):
