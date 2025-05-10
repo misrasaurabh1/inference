@@ -859,43 +859,28 @@ class VideoConsumer:
             self._declared_source_fps = source_properties.fps
             self._timestamp_created = source_properties.timestamp_created
 
-        if self._timestamp_created:
-            frame_timestamp = self._timestamp_created + timedelta(
-                seconds=self._frame_counter / self._declared_source_fps
-            )
-        else:
-            frame_timestamp = datetime.now()
+        self._update_frame_timestamp()
 
         success = video.grab()
         self._stream_consumption_pace_monitor.tick()
         if not success:
             return False
         self._frame_counter += 1
-        send_video_source_status_update(
-            severity=UpdateSeverity.DEBUG,
-            event_type=FRAME_CAPTURED_EVENT,
-            payload={
-                "frame_timestamp": frame_timestamp,
-                "frame_id": self._frame_counter,
-                "source_id": source_id,
-            },
-            status_update_handlers=self._status_update_handlers,
-        )
-        measured_source_fps = declared_source_fps
+        self._send_frame_update(FRAME_CAPTURED_EVENT, frame_timestamp, source_id)
+
         if not is_source_video_file:
-            if hasattr(self._stream_consumption_pace_monitor, "fps"):
-                measured_source_fps = self._stream_consumption_pace_monitor.fps
-            else:
-                measured_source_fps = self._stream_consumption_pace_monitor()
+            measured_source_fps = self._get_measured_source_fps()
+        else:
+            measured_source_fps = declared_source_fps
 
         if self._video_fps_should_be_sub_sampled():
             return True
+
         return self._consume_stream_frame(
             video=video,
             declared_source_fps=declared_source_fps,
             measured_source_fps=measured_source_fps,
             is_source_video_file=is_source_video_file,
-            frame_timestamp=frame_timestamp,
             buffer=buffer,
             frames_buffering_allowed=frames_buffering_allowed,
             source_id=source_id,
@@ -912,19 +897,9 @@ class VideoConsumer:
     def _video_fps_should_be_sub_sampled(self) -> bool:
         if self._desired_fps is None:
             return False
-        if self._is_source_video_file:
-            actual_fps = self._declared_source_fps
-        else:
-            fraction_of_pace_monitor_samples = (
-                len(self._stream_consumption_pace_monitor.all_timestamps)
-                / self._stream_consumption_pace_monitor.all_timestamps.maxlen
-            )
-            if fraction_of_pace_monitor_samples < 0.9:
-                actual_fps = self._declared_source_fps
-            elif hasattr(self._stream_consumption_pace_monitor, "fps"):
-                actual_fps = self._stream_consumption_pace_monitor.fps
-            else:
-                actual_fps = self._stream_consumption_pace_monitor()
+
+        actual_fps = self._get_actual_fps()
+
         if self._frame_counter == self._next_frame_from_video_to_accept:
             stride = calculate_video_file_stride(
                 actual_fps=actual_fps,
@@ -932,7 +907,6 @@ class VideoConsumer:
             )
             self._next_frame_from_video_to_accept += stride
             return False
-        # skipping frame
         return True
 
     def _consume_stream_frame(
@@ -950,57 +924,42 @@ class VideoConsumer:
         Returns: boolean flag with success status
         """
         if not frames_buffering_allowed:
-            send_frame_drop_update(
-                frame_timestamp=frame_timestamp,
-                frame_id=self._frame_counter,
-                cause="Buffering not allowed at the moment",
-                status_update_handlers=self._status_update_handlers,
-                source_id=source_id,
-            )
+            self._send_frame_dropped_update("Buffering not allowed at the moment")
             return True
-        if self._frame_should_be_adaptively_dropped(
-            declared_source_fps=declared_source_fps
-        ):
+
+        if self._frame_should_be_adaptively_dropped(declared_source_fps):
             self._adaptive_frames_dropped_in_row += 1
-            send_frame_drop_update(
-                frame_timestamp=frame_timestamp,
-                frame_id=self._frame_counter,
-                cause="ADAPTIVE strategy",
-                status_update_handlers=self._status_update_handlers,
-                source_id=source_id,
-            )
+            self._send_frame_dropped_update("ADAPTIVE strategy")
             return True
+
         self._adaptive_frames_dropped_in_row = 0
+
         if (
             not buffer.full()
             or self._buffer_filling_strategy is BufferFillingStrategy.WAIT
         ):
             return decode_video_frame_to_buffer(
-                frame_timestamp=frame_timestamp,
+                frame_timestamp=self._frame_timestamp,
                 frame_id=self._frame_counter,
                 video=video,
                 buffer=buffer,
                 decoding_pace_monitor=self._decoding_pace_monitor,
                 source_id=source_id,
                 declared_source_fps=declared_source_fps,
-                measured_source_fps=measured_source_fps,
+                measured_fps=measured_source_fps,
                 comes_from_video_file=is_source_video_file,
             )
+
         if self._buffer_filling_strategy in DROP_OLDEST_STRATEGIES:
             return self._process_stream_frame_dropping_oldest(
-                frame_timestamp=frame_timestamp,
+                frame_timestamp=self._frame_timestamp,
                 video=video,
                 buffer=buffer,
                 source_id=source_id,
                 is_video_file=is_source_video_file,
             )
-        send_frame_drop_update(
-            frame_timestamp=frame_timestamp,
-            frame_id=self._frame_counter,
-            cause="DROP_LATEST strategy",
-            status_update_handlers=self._status_update_handlers,
-            source_id=source_id,
-        )
+
+        self._send_frame_dropped_update("DROP_LATEST strategy")
         return True
 
     def _frame_should_be_adaptively_dropped(
@@ -1077,6 +1036,54 @@ class VideoConsumer:
             decoding_pace_monitor=self._decoding_pace_monitor,
             source_id=source_id,
             comes_from_video_file=is_video_file,
+        )
+
+    def _update_frame_timestamp(self):
+        if self._timestamp_created:
+            self._frame_timestamp = self._timestamp_created + timedelta(
+                seconds=self._frame_counter / self._declared_source_fps
+            )
+        else:
+            self._frame_timestamp = datetime.now()
+
+    def _send_frame_update(self, event_type, frame_timestamp, source_id):
+        send_video_source_status_update(
+            severity=UpdateSeverity.DEBUG,
+            event_type=event_type,
+            payload={
+                "frame_timestamp": frame_timestamp,
+                "frame_id": self._frame_counter,
+                "source_id": source_id,
+            },
+            status_update_handlers=self._status_update_handlers,
+        )
+
+    def _get_measured_source_fps(self):
+        if hasattr(self._stream_consumption_pace_monitor, "fps"):
+            return self._stream_consumption_pace_monitor.fps
+        return self._stream_consumption_pace_monitor()
+
+    def _get_actual_fps(self) -> float:
+        if self._is_source_video_file:
+            return self._declared_source_fps
+
+        fraction_of_pace_monitor_samples = (
+            len(self._stream_consumption_pace_monitor.all_timestamps)
+            / self._stream_consumption_pace_monitor.all_timestamps.maxlen
+        )
+
+        if fraction_of_pace_monitor_samples < 0.9:
+            return self._declared_source_fps
+
+        return self._get_measured_source_fps()
+
+    def _send_frame_dropped_update(self, cause: str):
+        send_frame_drop_update(
+            frame_timestamp=self._frame_timestamp,
+            frame_id=self._frame_counter,
+            cause=cause,
+            status_update_handlers=self._status_update_handlers,
+            source_id=None,
         )
 
 
