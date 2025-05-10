@@ -34,27 +34,33 @@ class WithFixedSizeCache(ModelManagerDecorator):
         queue_id = self._resolve_queue_id(
             model_id=model_id, model_id_alias=model_id_alias
         )
+
+        # Check if the model is already in the manager
         if queue_id in self:
-            logger.debug(
-                f"Detected {queue_id} in WithFixedSizeCache models queue -> marking as most recently used."
-            )
             self._key_queue.remove(queue_id)
             self._key_queue.append(queue_id)
             return None
 
-        logger.debug(f"Current capacity of ModelManager: {len(self)}/{self.max_size}")
-        while len(self) >= self.max_size or (
+        # Ensuring the log statement is executed minimally
+        current_len = len(self)
+        if current_len >= self.max_size:
+            logger.debug(
+                f"Current capacity of ModelManager: {current_len}/{self.max_size}"
+            )
+
+        # Evict models if the cache is full or memory pressure is detected
+        while current_len >= self.max_size or (
             MEMORY_FREE_THRESHOLD and self.memory_pressure_detected()
         ):
             to_remove_model_id = self._key_queue.popleft()
-            super().remove(
-                to_remove_model_id, delete_from_disk=DISK_CACHE_CLEANUP
-            )  # LRU model overflow cleanup may or maynot need the weights removed from disk
+            super().remove(to_remove_model_id, delete_from_disk=DISK_CACHE_CLEANUP)
             logger.debug(f"Model {to_remove_model_id} successfully unloaded.")
-        logger.debug(f"Marking new model {queue_id} as most recently used.")
+            current_len -= 1
+
         self._key_queue.append(queue_id)
+        # Adding the model
         try:
-            return super().add_model(model_id, api_key, model_id_alias=model_id_alias)
+            super().add_model(model_id, api_key, model_id_alias=model_id_alias)
         except Exception as error:
             logger.debug(
                 f"Could not initialise model {queue_id}. Removing from WithFixedSizeCache models queue."
@@ -145,21 +151,12 @@ class WithFixedSizeCache(ModelManagerDecorator):
         return model_id if model_id_alias is None else model_id_alias
 
     def memory_pressure_detected(self) -> bool:
-        return_boolean = False
         try:
             import torch
 
             if torch.cuda.is_available():
                 free_memory, total_memory = torch.cuda.mem_get_info()
-                return_boolean = (
-                    float(free_memory / total_memory) < MEMORY_FREE_THRESHOLD
-                )
-                logger.debug(
-                    f"Free memory: {free_memory}, Total memory: {total_memory}, threshold: {MEMORY_FREE_THRESHOLD}, return_boolean: {return_boolean}"
-                )
-            # TODO: Add memory calculation for other non-CUDA devices
+                return float(free_memory / total_memory) < MEMORY_FREE_THRESHOLD
         except Exception as e:
-            logger.error(
-                f"Failed to check CUDA memory pressure: {e}, returning {return_boolean}"
-            )
-        return return_boolean
+            logger.error(f"Failed to check CUDA memory pressure: {e}, returning False")
+        return False
