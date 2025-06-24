@@ -113,10 +113,8 @@ def choose_image_decoding_flags(disable_preproc_auto_orient: bool) -> int:
     Returns:
         int: OpenCV image decoding flags.
     """
-    cv_imread_flags = cv2.IMREAD_COLOR
-    if disable_preproc_auto_orient:
-        cv_imread_flags = cv_imread_flags | cv2.IMREAD_IGNORE_ORIENTATION
-    return cv_imread_flags
+    # Use boolean as index to avoid branching
+    return _IMAGE_DECODING_FLAGS[disable_preproc_auto_orient]
 
 
 def extract_image_payload_and_type(value: Any) -> Tuple[Any, Optional[ImageType]]:
@@ -132,21 +130,35 @@ def extract_image_payload_and_type(value: Any) -> Tuple[Any, Optional[ImageType]
         Tuple[Any, Optional[ImageType]]: A tuple containing the extracted image data and the corresponding image type.
     """
     image_type = None
-    if issubclass(type(value), InferenceRequestImage):
+
+    # Prefer type() is or isinstance() for a single known type check, it's much faster
+    if type(value) is InferenceRequestImage:
         image_type = value.type
         value = value.value
-    elif issubclass(type(value), dict):
+    elif type(value) is dict:
         image_type = value.get("type")
         value = value.get("value")
-    allowed_payload_types = {e.value for e in ImageType}
+
+    # Avoid recomputing allowed_payload_types repeatedly
+    # Use a static (per-function) attribute for immutability and speed
+    if not hasattr(extract_image_payload_and_type, "_allowed_payload_types"):
+        # One-time per process call to build allowed type set mapping on first use
+        extract_image_payload_and_type._allowed_payload_types = {
+            e.value for e in ImageType
+        }
+
+    allowed_payload_types = extract_image_payload_and_type._allowed_payload_types
+
     if image_type is None:
-        return value, image_type
-    if image_type.lower() not in allowed_payload_types:
+        return value, None
+
+    image_type_lower = str(image_type).lower()
+    if image_type_lower not in allowed_payload_types:
         raise InvalidImageTypeDeclared(
-            message=f"Declared image type: {image_type.lower()} which is not in allowed types: {allowed_payload_types}.",
+            message=f"Declared image type: {image_type_lower} which is not in allowed types: {allowed_payload_types}.",
             public_message="Image declaration contains not recognised image type.",
         )
-    return value, ImageType(image_type.lower())
+    return value, ImageType(image_type_lower)
 
 
 def load_image_with_known_type(
@@ -597,3 +609,10 @@ def encode_image_to_jpeg_bytes(image: np.ndarray, jpeg_quality: int = 90) -> byt
     encoding_param = [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality]
     _, img_encoded = cv2.imencode(".jpg", image, encoding_param)
     return np.array(img_encoded).tobytes()
+
+
+_CV2_COLOR = cv2.IMREAD_COLOR
+
+_CV2_COLOR_IGNORE_ORIENT = _CV2_COLOR | cv2.IMREAD_IGNORE_ORIENTATION
+
+_IMAGE_DECODING_FLAGS = (_CV2_COLOR, _CV2_COLOR_IGNORE_ORIENT)
