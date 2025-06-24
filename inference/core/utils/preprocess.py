@@ -11,6 +11,7 @@ from inference.core.env import (
     DISABLE_PREPROC_STATIC_CROP,
     USE_PYTORCH_FOR_PREPROCESSING,
 )
+from inference.core.exceptions import PreProcessingError
 
 if USE_PYTORCH_FOR_PREPROCESSING:
     import torch
@@ -65,6 +66,7 @@ def prepare(
         to conditionally enable or disable certain preprocessing steps.
     """
     try:
+        # ---- Fast check for numpy array; else use torch logic ----
         if isinstance(image, np.ndarray):
             h, w = image.shape[0:2]
         elif USE_PYTORCH_FOR_PREPROCESSING:
@@ -75,29 +77,56 @@ def prepare(
                 "This is most likely a bug. Contact Roboflow team through github issues "
                 "(https://github.com/roboflow/inference/issues) providing full context of the problem"
             )
-
         img_dims = (h, w)
-        if static_crop_should_be_applied(
-            preprocessing_config=preproc,
-            disable_preproc_static_crop=disable_preproc_static_crop,
-        ):
-            image = take_static_crop(
-                image=image, crop_parameters=preproc[STATIC_CROP_KEY]
-            )
-        if contrast_adjustments_should_be_applied(
-            preprocessing_config=preproc,
-            disable_preproc_contrast=disable_preproc_contrast,
-        ):
-            adjustment_type = ContrastAdjustmentType(preproc[CONTRAST_KEY][TYPE_KEY])
-            image = apply_contrast_adjustment(
-                image=image, adjustment_type=adjustment_type
-            )
-        if grayscale_conversion_should_be_applied(
-            preprocessing_config=preproc,
-            disable_preproc_grayscale=disable_preproc_grayscale,
-        ):
-            image = apply_grayscale_conversion(image=image)
+
+        # ---- Optimized decision logic for preprocessing steps ----
+        # Use local copies of global keys because dict lookups are hot.
+        static_crop_key = STATIC_CROP_KEY
+        contrast_key = CONTRAST_KEY
+        grayscale_key = GRAYSCALE_KEY
+        enabled_key = ENABLED_KEY
+        type_key = TYPE_KEY
+        disable_static_crop_flag = DISABLE_PREPROC_STATIC_CROP
+        disable_contrast_flag = DISABLE_PREPROC_CONTRAST
+        disable_grayscale_flag = DISABLE_PREPROC_GRAYSCALE
+
+        # Static Crop
+        # Use 'in dict' instead of 'in dict.keys()' for O(1) lookup and inlined function for speed.
+        sc_present = (
+            (static_crop_key in preproc)
+            and (not disable_static_crop_flag)
+            and (not disable_preproc_static_crop)
+        )
+        if sc_present:
+            static_crop_obj = preproc[static_crop_key]
+            if static_crop_obj[enabled_key]:
+                image = take_static_crop(image, static_crop_obj)
+
+        # Contrast Adjustment
+        ca_present = (
+            (contrast_key in preproc)
+            and (not disable_contrast_flag)
+            and (not disable_preproc_contrast)
+        )
+        if ca_present:
+            contrast_obj = preproc[contrast_key]
+            if contrast_obj[enabled_key]:
+                adjustment_type = ContrastAdjustmentType(contrast_obj[type_key])
+                image = apply_contrast_adjustment(image, adjustment_type)
+
+        # Grayscale Conversion
+        gs_present = (
+            (grayscale_key in preproc)
+            and (not disable_grayscale_flag)
+            and (not disable_preproc_grayscale)
+        )
+        if gs_present:
+            grayscale_obj = preproc[grayscale_key]
+            if grayscale_obj[enabled_key]:
+                image = apply_grayscale_conversion(image)
+
         return image, img_dims
+
     except KeyError as error:
         raise PreProcessingError(
             f"Pre-processing of image failed due to misconfiguration. Missing key: {error}."
@@ -117,11 +146,14 @@ def static_crop_should_be_applied(
 
 
 def take_static_crop(image: np.ndarray, crop_parameters: Dict[str, int]) -> np.ndarray:
+    # Performance: compute bounds with local variables (avoid repeated dict and img.shape lookups)
     height, width = image.shape[0:2]
-    x_min = int(crop_parameters["x_min"] / 100 * width)
-    y_min = int(crop_parameters["y_min"] / 100 * height)
-    x_max = int(crop_parameters["x_max"] / 100 * width)
-    y_max = int(crop_parameters["y_max"] / 100 * height)
+    fx = width / 100.0
+    fy = height / 100.0
+    x_min = int(crop_parameters["x_min"] * fx)
+    y_min = int(crop_parameters["y_min"] * fy)
+    x_max = int(crop_parameters["x_max"] * fx)
+    y_max = int(crop_parameters["y_max"] * fy)
     return image[y_min:y_max, x_min:x_max, :]
 
 
@@ -141,7 +173,9 @@ def apply_contrast_adjustment(
     image: np.ndarray,
     adjustment_type: ContrastAdjustmentType,
 ) -> np.ndarray:
-    adjustment = CONTRAST_ADJUSTMENTS_METHODS[adjustment_type]
+    # Fast local binding from global (dict lookup is O(1) with small keys)
+    adj_methods = CONTRAST_ADJUSTMENTS_METHODS
+    adjustment = adj_methods[adjustment_type]
     return adjustment(image)
 
 
@@ -183,8 +217,9 @@ def grayscale_conversion_should_be_applied(
 
 
 def apply_grayscale_conversion(image: np.ndarray) -> np.ndarray:
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    # Slight optimization by using local variable for two-step OpenCV calls.
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
 
 def letterbox_image(
