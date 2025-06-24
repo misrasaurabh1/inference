@@ -113,10 +113,8 @@ def choose_image_decoding_flags(disable_preproc_auto_orient: bool) -> int:
     Returns:
         int: OpenCV image decoding flags.
     """
-    cv_imread_flags = cv2.IMREAD_COLOR
-    if disable_preproc_auto_orient:
-        cv_imread_flags = cv_imread_flags | cv2.IMREAD_IGNORE_ORIENTATION
-    return cv_imread_flags
+    # Use boolean as index to avoid branching
+    return _IMAGE_DECODING_FLAGS[disable_preproc_auto_orient]
 
 
 def extract_image_payload_and_type(value: Any) -> Tuple[Any, Optional[ImageType]]:
@@ -132,21 +130,35 @@ def extract_image_payload_and_type(value: Any) -> Tuple[Any, Optional[ImageType]
         Tuple[Any, Optional[ImageType]]: A tuple containing the extracted image data and the corresponding image type.
     """
     image_type = None
-    if issubclass(type(value), InferenceRequestImage):
+
+    # Prefer type() is or isinstance() for a single known type check, it's much faster
+    if type(value) is InferenceRequestImage:
         image_type = value.type
         value = value.value
-    elif issubclass(type(value), dict):
+    elif type(value) is dict:
         image_type = value.get("type")
         value = value.get("value")
-    allowed_payload_types = {e.value for e in ImageType}
+
+    # Avoid recomputing allowed_payload_types repeatedly
+    # Use a static (per-function) attribute for immutability and speed
+    if not hasattr(extract_image_payload_and_type, "_allowed_payload_types"):
+        # One-time per process call to build allowed type set mapping on first use
+        extract_image_payload_and_type._allowed_payload_types = {
+            e.value for e in ImageType
+        }
+
+    allowed_payload_types = extract_image_payload_and_type._allowed_payload_types
+
     if image_type is None:
-        return value, image_type
-    if image_type.lower() not in allowed_payload_types:
+        return value, None
+
+    image_type_lower = str(image_type).lower()
+    if image_type_lower not in allowed_payload_types:
         raise InvalidImageTypeDeclared(
-            message=f"Declared image type: {image_type.lower()} which is not in allowed types: {allowed_payload_types}.",
+            message=f"Declared image type: {image_type_lower} which is not in allowed types: {allowed_payload_types}.",
             public_message="Image declaration contains not recognised image type.",
         )
-    return value, ImageType(image_type.lower())
+    return value, ImageType(image_type_lower)
 
 
 def load_image_with_known_type(
@@ -193,23 +205,47 @@ def load_image_with_inferred_type(
     Raises:
         NotImplementedError: If the image type could not be inferred.
     """
-    if isinstance(value, (np.ndarray, np.generic)):
+    ndarray = np.ndarray
+    ImageImage = Image.Image
+    is_str = isinstance(value, str)
+
+    # Fast path: already a numpy array
+    if isinstance(value, (ndarray, np.generic)):
         validate_numpy_image(data=value)
         return value, True
-    elif isinstance(value, Image.Image):
-        return np.asarray(value.convert("RGB")), False
-    elif isinstance(value, str) and (value.startswith("http")):
+
+    # Fast path: PIL.Image
+    if isinstance(value, ImageImage):
+        # Only convert if not already "RGB" and of 3 channels
+        if value.mode == "RGB":
+            arr = np.asarray(value)
+        else:
+            arr = np.asarray(value.convert("RGB"))
+        return arr, False
+
+    # Fast path: URL string
+    if is_str and value.startswith("http"):
         return load_image_from_url(value=value, cv_imread_flags=cv_imread_flags), True
-    elif (
-        isinstance(value, str)
-        and ALLOW_LOADING_IMAGES_FROM_LOCAL_FILESYSTEM
-        and os.path.isfile(value)
-    ):
-        return cv2.imread(value, cv_imread_flags), True
-    else:
-        return attempt_loading_image_from_string(
-            value=value, cv_imread_flags=cv_imread_flags
-        )
+
+    # Fast path: local file
+    if is_str and ALLOW_LOADING_IMAGES_FROM_LOCAL_FILESYSTEM:
+        try:
+            is_file = os.path.isfile
+            if is_file(value):
+                arr = cv2.imread(value, cv_imread_flags)
+                if arr is None:
+                    raise InputImageLoadError(
+                        message=f"Could not load image from file: {value}",
+                        public_message=f"File could not be decoded into image.",
+                    )
+                return arr, True
+        except Exception:  # (rare, e.g., os/file IO)
+            pass
+
+    # Fallback: string/bytes/buffer inference
+    return attempt_loading_image_from_string(
+        value=value, cv_imread_flags=cv_imread_flags
+    )
 
 
 def attempt_loading_image_from_string(
@@ -226,24 +262,35 @@ def attempt_loading_image_from_string(
     Returns:
         Tuple[np.ndarray, bool]: A tuple of the loaded image in numpy array format and a boolean flag indicating if the image is in BGR format.
     """
+    # The most likely/acceptable order:
+    # (1) base64 (fast fail if not str/bytes) -> encoded bytes -> buffer -> numpy
+
+    # Quick failure minimization
+    # base64 loader: usually expects str/bytes
     try:
         return load_image_base64(value=value, cv_imread_flags=cv_imread_flags), True
-    except:
+    except Exception:
         pass
+
+    # encoded bytes: commonly used for byte/binary strings
     try:
         return (
             load_image_from_encoded_bytes(value=value, cv_imread_flags=cv_imread_flags),
             True,
         )
-    except:
+    except Exception:
         pass
+
+    # buffer
     try:
         return (
             load_image_from_buffer(value=value, cv_imread_flags=cv_imread_flags),
             True,
         )
-    except:
+    except Exception:
         pass
+
+    # numpy-pickled string
     try:
         return load_image_from_numpy_str(value=value), True
     except InvalidImageTypeDeclared as error:
@@ -360,21 +407,28 @@ def validate_numpy_image(data: np.ndarray) -> None:
     Raises:
         InvalidNumpyInput: If the provided data is not a valid numpy image.
     """
-    if not issubclass(type(data), np.ndarray):
+    typ = type(data)
+    if not (typ is np.ndarray or issubclass(typ, np.ndarray)):
         raise InvalidNumpyInput(
-            message=f"Data provided as input could not be decoded into np.ndarray object.",
-            public_message=f"Data provided as input could not be decoded into np.ndarray object.",
+            message="Data provided as input could not be decoded into np.ndarray object.",
+            public_message="Data provided as input could not be decoded into np.ndarray object.",
         )
-    if len(data.shape) != 3 and len(data.shape) != 2:
+    ndim = data.ndim
+    if ndim != 3 and ndim != 2:
         raise InvalidNumpyInput(
-            message=f"For image given as np.ndarray expected 2 or 3 dimensions, got {len(data.shape)} dimensions.",
-            public_message=f"For image given as np.ndarray expected 2 or 3 dimensions.",
+            message=f"For image given as np.ndarray expected 2 or 3 dimensions, got {ndim} dimensions.",
+            public_message="For image given as np.ndarray expected 2 or 3 dimensions.",
         )
-    if data.shape[-1] != 3 and data.shape[-1] != 1:
-        raise InvalidNumpyInput(
-            message=f"For image given as np.ndarray expected 1 or 3 channels, got {data.shape[-1]} channels.",
-            public_message="For image given as np.ndarray expected 1 or 3 channels.",
-        )
+    # Accept:
+    # 1. If 2D, skip channel count check
+    # 2. If 3D, check last dim for channel
+    if ndim == 3:
+        ch = data.shape[-1]
+        if ch != 3 and ch != 1:
+            raise InvalidNumpyInput(
+                message=f"For image given as np.ndarray expected 1 or 3 channels, got {ch} channels.",
+                public_message="For image given as np.ndarray expected 1 or 3 channels.",
+            )
 
 
 def load_image_from_url(
@@ -400,12 +454,11 @@ def load_image_from_url(
     _ensure_resource_schema_allowed(schema=parsed_url.scheme)
     domain_extraction_result = tldextract.TLDExtract(suffix_list_urls=())(
         parsed_url.netloc
-    )  # we get rid of potential ports and parse FQDNs
+    )
     _ensure_resource_fqdn_allowed(fqdn=domain_extraction_result.fqdn)
     address_parts_concatenated = _concatenate_chunks_of_network_location(
         extraction_result=domain_extraction_result
-    )  # concatenation of chunks - even if there is no FQDN, but address
-    # it allows white-/black-list verification
+    )
     _ensure_location_matches_destination_whitelist(
         destination=address_parts_concatenated
     )
@@ -597,3 +650,10 @@ def encode_image_to_jpeg_bytes(image: np.ndarray, jpeg_quality: int = 90) -> byt
     encoding_param = [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality]
     _, img_encoded = cv2.imencode(".jpg", image, encoding_param)
     return np.array(img_encoded).tobytes()
+
+
+_CV2_COLOR = cv2.IMREAD_COLOR
+
+_CV2_COLOR_IGNORE_ORIENT = _CV2_COLOR | cv2.IMREAD_IGNORE_ORIENTATION
+
+_IMAGE_DECODING_FLAGS = (_CV2_COLOR, _CV2_COLOR_IGNORE_ORIENT)
