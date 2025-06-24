@@ -130,7 +130,7 @@ def contrast_adjustments_should_be_applied(
     disable_preproc_contrast: bool,
 ) -> bool:
     return (
-        CONTRAST_KEY in preprocessing_config.keys()
+        CONTRAST_KEY in preprocessing_config
         and not DISABLE_PREPROC_CONTRAST
         and not disable_preproc_contrast
         and preprocessing_config[CONTRAST_KEY][ENABLED_KEY]
